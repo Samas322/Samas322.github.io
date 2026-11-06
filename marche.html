@@ -45,6 +45,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
    &yaw=0            direction de départ en degrés
    &speed=2          vitesse de marche en m/s
    &collide=0        désactive les collisions
+   &fov=70           champ de vision en degrés (20 à 120) ; la molette le modifie aussi
 ------------------------------------------------ */
 const P = new URLSearchParams(location.search);
 const file   = (P.get('m') || 'modele.glb').split('/').pop();
@@ -52,6 +53,7 @@ const EYE    = parseFloat(P.get('h') || '1.6');
 const SCALE  = parseFloat(P.get('scale') || '1');
 const SPEED  = parseFloat(P.get('speed') || '2');
 const COLLIDE = P.get('collide') !== '0';
+const FOV    = Math.min(120, Math.max(20, parseFloat(P.get('fov') || '70')));
 const RADIUS = 0.35;
 
 const isTouch = matchMedia('(pointer: coarse)').matches;
@@ -82,7 +84,7 @@ sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 scene.add(sun, sun.target);
 
-const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 500);
+const camera = new THREE.PerspectiveCamera(FOV, innerWidth / innerHeight, 0.05, 500);
 camera.rotation.order = 'YXZ';
 scene.add(camera);
 
@@ -203,6 +205,13 @@ const end = (e) => {
 };
 cv.addEventListener('pointerup', end);
 cv.addEventListener('pointercancel', end);
+
+// Molette = zoom (change le champ de vision), entre 30° et 100°
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  camera.fov = Math.min(100, Math.max(30, camera.fov + e.deltaY * 0.03));
+  camera.updateProjectionMatrix();
+}, { passive: false });
 
 document.getElementById('fs').onclick = () => {
   if (document.fullscreenElement) document.exitFullscreen();
