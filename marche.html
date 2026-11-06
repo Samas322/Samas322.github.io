@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Visite 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #e9e9e9; font-family: system-ui, sans-serif; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+  #load { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #f4f4f4; color: #333; z-index: 5; transition: opacity .4s; }
+  #bar { width: 200px; height: 4px; background: #ccc; margin-top: 12px; border-radius: 2px; overflow: hidden; }
+  #bar i { display: block; height: 100%; width: 0; background: #333; }
+  #hint { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); background: rgba(0,0,0,.55); color: #fff; padding: 8px 14px; border-radius: 20px; font-size: 13px; pointer-events: none; transition: opacity .6s; text-align: center; max-width: 90%; }
+  #fs { position: fixed; top: 10px; right: 10px; width: 38px; height: 38px; border: 0; border-radius: 50%; background: rgba(0,0,0,.55); color: #fff; font-size: 18px; cursor: pointer; z-index: 4; }
+  .joy { position: fixed; width: 90px; height: 90px; margin: -45px 0 0 -45px; border: 2px solid rgba(255,255,255,.8); background: rgba(0,0,0,.2); border-radius: 50%; pointer-events: none; display: none; z-index: 3; }
+  .joy b { position: absolute; width: 40px; height: 40px; left: 25px; top: 25px; border-radius: 50%; background: rgba(255,255,255,.85); }
+  #err { color: #b00020; padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+<div id="load"><div id="msg">Chargement du modèle…</div><div id="bar"><i></i></div></div>
+<button id="fs" title="Plein écran">⛶</button>
+<div id="hint"></div>
+<div class="joy" id="joy"><b></b></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+/* ---------- Paramètres (dans le lien) ----------
+   ?m=salon.glb      fichier à afficher
+   &h=1.6            hauteur des yeux en mètres
+   &scale=1          facteur d'échelle (ex. 0.0254 si le modèle est en pouces, 0.001 s'il est en mm)
+   &spawn=x,y,z      point de départ (en mètres, après échelle)
+   &yaw=0            direction de départ en degrés
+   &speed=2          vitesse de marche en m/s
+   &collide=0        désactive les collisions
+------------------------------------------------ */
+const P = new URLSearchParams(location.search);
+const file   = (P.get('m') || 'modele.glb').split('/').pop();
+const EYE    = parseFloat(P.get('h') || '1.6');
+const SCALE  = parseFloat(P.get('scale') || '1');
+const SPEED  = parseFloat(P.get('speed') || '2');
+const COLLIDE = P.get('collide') !== '0';
+const RADIUS = 0.35;
+
+const isTouch = matchMedia('(pointer: coarse)').matches;
+const hint = document.getElementById('hint');
+hint.textContent = isTouch
+  ? 'Joystick à gauche pour avancer · glisse à droite pour regarder'
+  : 'Clique-glisse pour regarder · ZQSD / WASD / flèches pour marcher · Maj pour courir';
+setTimeout(() => hint.style.opacity = 0, 7000);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+renderer.domElement.tabIndex = 0;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xdfe6ee);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+scene.add(sun, sun.target);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 500);
+camera.rotation.order = 'YXZ';
+scene.add(camera);
+
+/* ---------- Chargement ---------- */
+const draco = new DRACOLoader().setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
+const loader = new GLTFLoader().setDRACOLoader(draco).setMeshoptDecoder(MeshoptDecoder);
+const meshes = [];
+const raycaster = new THREE.Raycaster();
+let ready = false;
+let yaw = THREE.MathUtils.degToRad(parseFloat(P.get('yaw') || '0')), pitch = 0;
+
+loader.load(file, (gltf) => {
+  const root = gltf.scene;
+  root.scale.multiplyScalar(SCALE);
+  root.updateMatrixWorld(true);
+  root.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true; o.receiveShadow = true;
+      // SketchUp exporte souvent des faces à l'envers : on affiche et on détecte les deux côtés
+      (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => { m.side = THREE.DoubleSide; });
+      meshes.push(o);
+    }
+  });
+  scene.add(root);
+
+  const box = new THREE.Box3().setFromObject(root);
+  const size = box.getSize(new THREE.Vector3());
+  const ctr  = box.getCenter(new THREE.Vector3());
+
+  // Soleil adapté à la taille du modèle
+  const d = Math.max(size.x, size.z) * 0.8 + 5;
+  sun.position.set(ctr.x + d, box.max.y + d, ctr.z + d * 0.5);
+  sun.target.position.copy(ctr);
+  Object.assign(sun.shadow.camera, { left: -d, right: d, top: d, bottom: -d, near: 0.5, far: d * 4 });
+  sun.shadow.camera.updateProjectionMatrix();
+  scene.fog = new THREE.Fog(0xdfe6ee, d * 2, d * 8);
+
+  // Point de départ
+  const sp = P.get('spawn');
+  let start;
+  if (sp) {
+    const [x, y, z] = sp.split(',').map(Number);
+    start = new THREE.Vector3(x, y + EYE, z);
+  } else {
+    start = new THREE.Vector3(ctr.x, box.min.y + EYE, ctr.z);
+    const g = groundAt(ctr.x, box.min.y + 2.2, ctr.z);
+    if (g !== null) start.y = g + EYE;
+  }
+  camera.position.copy(start);
+  ready = true;
+  const l = document.getElementById('load');
+  l.style.opacity = 0; setTimeout(() => l.remove(), 450);
+}, (e) => {
+  if (e.total) document.querySelector('#bar i').style.width = (100 * e.loaded / e.total) + '%';
+}, (err) => {
+  document.getElementById('load').innerHTML = '<div id="err">Impossible de charger « ' + file + ' ».<br>Vérifie le nom du fichier dans le lien (?m=...).</div>';
+  console.error(err);
+});
+
+/* ---------- Collisions ---------- */
+function groundAt(x, fromY, z) {
+  raycaster.set(new THREE.Vector3(x, fromY, z), new THREE.Vector3(0, -1, 0));
+  raycaster.near = 0; raycaster.far = 6;
+  const h = raycaster.intersectObjects(meshes, false)[0];
+  return h ? h.point.y : null;
+}
+function blocked(dx, dz) {
+  const len = Math.hypot(dx, dz);
+  if (!len) return false;
+  const origin = new THREE.Vector3(camera.position.x, camera.position.y - EYE + 0.6, camera.position.z); // hauteur de la taille
+  raycaster.set(origin, new THREE.Vector3(dx / len, 0, dz / len));
+  raycaster.near = 0; raycaster.far = RADIUS + len;
+  return raycaster.intersectObjects(meshes, false).length > 0;
+}
+
+/* ---------- Entrées ---------- */
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; if (e.code.startsWith('Arrow')) e.preventDefault(); });
+addEventListener('keyup',   e => { keys[e.code] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+const joyEl = document.getElementById('joy');
+const joyKnob = joyEl.firstElementChild;
+const joy = { id: null, ox: 0, oy: 0, x: 0, y: 0 };
+const look = { id: null, x: 0, y: 0 };
+const cv = renderer.domElement;
+
+cv.addEventListener('pointerdown', (e) => {
+  cv.focus();
+  cv.setPointerCapture(e.pointerId);
+  const useJoy = e.pointerType === 'touch' && e.clientX < innerWidth * 0.45 && joy.id === null;
+  if (useJoy) {
+    joy.id = e.pointerId; joy.ox = e.clientX; joy.oy = e.clientY; joy.x = joy.y = 0;
+    joyEl.style.display = 'block'; joyEl.style.left = joy.ox + 'px'; joyEl.style.top = joy.oy + 'px';
+    joyKnob.style.transform = 'translate(0,0)';
+  } else if (look.id === null) {
+    look.id = e.pointerId; look.x = e.clientX; look.y = e.clientY;
+  }
+});
+cv.addEventListener('pointermove', (e) => {
+  if (e.pointerId === joy.id) {
+    let dx = e.clientX - joy.ox, dy = e.clientY - joy.oy;
+    const m = Math.hypot(dx, dy), max = 45;
+    if (m > max) { dx = dx / m * max; dy = dy / m * max; }
+    joy.x = dx / max; joy.y = dy / max;
+    joyKnob.style.transform = `translate(${dx}px,${dy}px)`;
+  } else if (e.pointerId === look.id) {
+    const k = e.pointerType === 'touch' ? 0.006 : 0.0035;
+    yaw   -= (e.clientX - look.x) * k;
+    pitch -= (e.clientY - look.y) * k;
+    pitch = Math.max(-1.45, Math.min(1.45, pitch));
+    look.x = e.clientX; look.y = e.clientY;
+  }
+});
+const end = (e) => {
+  if (e.pointerId === joy.id) { joy.id = null; joy.x = joy.y = 0; joyEl.style.display = 'none'; }
+  if (e.pointerId === look.id) look.id = null;
+};
+cv.addEventListener('pointerup', end);
+cv.addEventListener('pointercancel', end);
+
+document.getElementById('fs').onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else (document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen)?.call(document.documentElement);
+};
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ---------- Boucle ---------- */
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (ready) {
+    let f = 0, s = 0;
+    if (keys.KeyW || keys.KeyZ || keys.ArrowUp)    f += 1;
+    if (keys.KeyS || keys.ArrowDown)               f -= 1;
+    if (keys.KeyD || keys.ArrowRight)              s += 1;
+    if (keys.KeyA || keys.KeyQ || keys.ArrowLeft)  s -= 1;
+    f -= joy.y; s += joy.x;
+    const mag = Math.hypot(f, s);
+    if (mag > 1) { f /= mag; s /= mag; }
+    const v = SPEED * ((keys.ShiftLeft || keys.ShiftRight) ? 2 : 1) * dt;
+
+    const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+    const rx =  Math.cos(yaw), rz = -Math.sin(yaw);
+    const dx = (fx * f + rx * s) * v;
+    const dz = (fz * f + rz * s) * v;
+
+    if (dx || dz) {
+      if (!COLLIDE) { camera.position.x += dx; camera.position.z += dz; }
+      else {
+        if (!blocked(dx, dz)) { camera.position.x += dx; camera.position.z += dz; }
+        else { // glissement le long des murs
+          if (!blocked(dx, 0)) camera.position.x += dx;
+          if (!blocked(0, dz)) camera.position.z += dz;
+        }
+      }
+    }
+    if (COLLIDE) { // suivre le sol (escaliers, rampes, dénivelés)
+      const g = groundAt(camera.position.x, camera.position.y - EYE + 0.5, camera.position.z);
+      if (g !== null) camera.position.y += (g + EYE - camera.position.y) * Math.min(1, dt * 10);
+    }
+  }
+  camera.rotation.set(pitch, yaw, 0);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
